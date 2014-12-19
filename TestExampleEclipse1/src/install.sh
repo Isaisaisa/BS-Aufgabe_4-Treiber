@@ -11,7 +11,9 @@ mode="664"
 
 # remove stale nodes
 rm -f /dev/${device}[0-1]
-major=$(awk -v mod ="$device" '$2==mod{print \\$1}' /proc/devices)
+#grep und cut in einem aus der Aufgabe4
+major=$(awk -v mod="$device" '$2==mod{print $1}' /proc/devices)
+echo $major
 mknod /dev/${device}0 c $major 0
 mknod /dev/${device}1 c $major 1
 
