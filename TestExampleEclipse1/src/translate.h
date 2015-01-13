@@ -17,28 +17,38 @@
 #include <linux/cdev.h>
 #include <linux/slab.h> /* für kzalloc */
 #include <linux/wait.h>
+#include <asm/uaccess.h>
+
+
+//#include <pthread.h>
 
 /* Defines */
 #define DEVICE_NODE "trans"
 #define FIRSTMINOR 0
 #define COUNT 1
-#define MAX 40
+#define translate_bufsize 40
+#define translate_shift 3
 
 /* Variables */
 dev_t dev_num;
 
 //int major;
-int is_open = 0;
+//int is_open = 0;
 
 
 
 struct translate_dev{
 	struct cdev chardevice;
-	char buffer[MAX];
+	char buffer[translate_bufsize];
 	char *p_in;		/* Zeiger auf Stelle in Buffer, wo reingeschrieben werden kann */
 	char *p_out; 	/* Zeiger auf Stelle in Buffer, wo herausgelesen weerden kann */
 	int count; 		/* Anzahl der elemente im buffer */
+	int shiftcount;  /* Verschiebungsgrad: bei Trans0 -> +1, bei Trans1 -> -1 */
+	int is_open_read;
+	int is_open_write;
 };
+
+static int find_index_in_alphabet(char character);
 
 /* Functions */
 static int __init init_translate(void);
@@ -53,10 +63,10 @@ static int open(struct inode *devicefile, struct file *instance);
 static int close(struct inode *devicefile, struct file *instance);
 
 /* read, wenn Programm lesen möchte */
-ssize_t read(struct file *filp, char __user *buff, size_t count, loff_t *offp);
+ssize_t read(struct file *instance, char __user *output, size_t count, loff_t *offp);
 
 /* write, wenn Programm schreiben möchte */
-ssize_t write(struct file *filp, const char __user *buff, size_t count, loff_t *offp);
+ssize_t write(struct file *instance, const char __user *input, size_t count, loff_t *offp);
 
 /* Strukturen */
 /* Strukt, welches zeigt welche Funktion welche ist */
@@ -65,6 +75,7 @@ struct file_operations fops = {
 	.release = close,
 	.read = read,
 	.write = write,
+	.owner = THIS_MODULE,
 };
 
 #endif /* TRANSLATE_H_ */

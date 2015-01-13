@@ -1,3 +1,4 @@
+EXTRA_CFLAGS+= -DPDEBUG
 
 obj-m := translate.o
 
