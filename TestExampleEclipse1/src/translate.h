@@ -17,7 +17,12 @@
 #include <linux/cdev.h>
 #include <linux/slab.h> /* für kzalloc */
 #include <linux/wait.h>
+#include <linux/sched.h> /* für wait_event_interruptible */
+#include <linux/mutex.h> /* für Semaphore */
+#include <linux/sem.h>
+#include <linux/moduleparam.h>
 #include <asm/uaccess.h>
+
 
 
 //#include <pthread.h>
@@ -28,24 +33,29 @@
 #define COUNT 1
 #define translate_bufsize 40
 #define translate_shift 3
+	//schreiben möglich, wenn weniger Elemente im Ringbuffer drin sind als translate_bufsize
+#define WRITE_POSSIBLE (device->count < bufsize)
+	//lesen möglich, wenn mehr Elemente als 0 im Ringbuffer drin sind
+#define READ_POSSIBLE (device->count > 0)
 
 /* Variables */
 dev_t dev_num;
 
-//int major;
-//int is_open = 0;
-
-
+int bufsize = translate_bufsize;
+int shiftsize = translate_shift;
 
 struct translate_dev{
 	struct cdev chardevice;
-	char buffer[translate_bufsize];
+	char *buffer;
 	char *p_in;		/* Zeiger auf Stelle in Buffer, wo reingeschrieben werden kann */
 	char *p_out; 	/* Zeiger auf Stelle in Buffer, wo herausgelesen weerden kann */
 	int count; 		/* Anzahl der elemente im buffer */
 	int shiftcount;  /* Verschiebungsgrad: bei Trans0 -> +1, bei Trans1 -> -1 */
-	int is_open_read;
-	int is_open_write;
+	int is_open_read; /* Prädikat ob Device bereits offen zum lesen ist */
+	int is_open_write; /* Prädikat ob Device bereits offen zum schreiben ist */
+	wait_queue_head_t waitqueue_read; /* Warteschlange wenn das Device nicht lesen kann, weil keine Elemente vorhanden */
+	wait_queue_head_t waitqueue_write; /* Warteschlange wenn das Device nicht schreiben kann, weil Buffer voll */
+	struct semaphore semaphore; /* Semaphore */
 };
 
 static int find_index_in_alphabet(char character);

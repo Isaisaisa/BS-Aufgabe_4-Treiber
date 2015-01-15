@@ -50,13 +50,27 @@ void setup_devices(struct translate_dev *dev, int index){
 
 	/* Initialiesierung des Ringbuffers
 	 * Schreib und leseadresse sind anfangs identisch */
+	dev->buffer = kzalloc(bufsize * sizeof(char), GFP_KERNEL);
 	dev->p_in = dev->buffer;
 	dev->p_out = dev->buffer;
 	dev->count = 0;
-	dev->shiftcount = (index ? -translate_shift : translate_shift); //index >= 1 -> true, == 0 -> false
+	dev->shiftcount = (index ? -shiftsize : shiftsize); //index >= 1 -> true, == 0 -> false
 
 	#ifdef PDEBUG
 		printk(KERN_DEBUG "Ringpuffer initialisiert");
+	#endif
+
+	init_waitqueue_head(&dev->waitqueue_read);
+	init_waitqueue_head(&dev->waitqueue_write);
+
+	#ifdef PDEBUG
+		printk(KERN_DEBUG "Wait-Queues initialisiert");
+	#endif
+
+	sema_init(&(dev->semaphore),1);
+
+	#ifdef PDEBUG
+		printk(KERN_DEBUG "Semaphore initialisiert");
 	#endif
 
 }
@@ -83,7 +97,8 @@ static int __init init_translate(void){
 	int i;
 	for(i = 0; i<2; i++){
 		setup_devices(&ptranslate_devices[i], i);  /* chardevice wird belegt, Device meldet sich im Kernel an*/
-		}
+	}
+
 
 	#ifdef PDEBUG
 		printk(KERN_DEBUG "debugging test");
@@ -107,7 +122,9 @@ static void cleanup_translate(void){
 		/* Devices entfernen */
 		int i;
 		for(i=0; i<2; i++){
+			kfree(&ptranslate_devices[i].buffer);
 			cdev_del(&ptranslate_devices[i].chardevice);
+
 		}
 
 		/* Speicher befreien */
@@ -134,6 +151,12 @@ static int open(struct inode *devicefile, struct file *instance){
 	device = container_of(devicefile->i_cdev, struct translate_dev, chardevice);
 	instance->private_data = device;
 
+	/* Semaphore für Device Prozess blockieren */
+	if(down_interruptible(&device->semaphore)){
+		return -ERESTARTSYS;
+	}
+
+	/* kritischer Abschnitt */
 	/* wenn Device bereits geöffnet ist, darf Prozess nicht darauf zugreifen */
 	if((instance->f_flags & O_ACCMODE) == O_RDONLY && !device->is_open_read){
 		device->is_open_read = 1;
@@ -146,8 +169,9 @@ static int open(struct inode *devicefile, struct file *instance){
 		printk(KERN_ALERT "already open");
 		return -EBUSY; /* Device ist beschäftigt */
 	}
-	/* Device war nicht offen wird aber jetzt als offen definiert */
 
+	/* kritischen Bereich verlassen und Semaphore freigeben */
+	up(&device->semaphore);
 
 
 	if(iminor(devicefile)==0){
@@ -174,6 +198,9 @@ static int close(struct inode *devicefile, struct file *instance){
 
 	/* zeiger auf die Device Struktur */
 	struct translate_dev *device;
+
+	device = container_of(devicefile->i_cdev, struct translate_dev, chardevice);
+	instance->private_data = device;
 
 	if((instance->f_flags & O_ACCMODE) == O_RDONLY && device->is_open_read){  /* Device durfte Lesen */
 		device->is_open_read = 0;
@@ -224,6 +251,18 @@ ssize_t read(struct file *instance, char __user *output, size_t count, loff_t *o
 				printk(KERN_DEBUG "Variablen in Write() initialisiert");
 			#endif
 
+
+			if(!READ_POSSIBLE){
+				if(instance->f_flags & O_NONBLOCK){
+					return -EAGAIN;
+				}
+
+				if(wait_event_interruptible(device->waitqueue_read, READ_POSSIBLE)){
+					return -ERESTARTSYS;
+				}
+			}
+
+
 			/* schreibt einen Wert aus der Adresse input in die Variable chari
 			 * get_user(variable, source)
 			 * source: Adresse von dem ein Wert in die Variable geschrieben werden soll
@@ -246,6 +285,11 @@ ssize_t read(struct file *instance, char __user *output, size_t count, loff_t *o
 			if(device->p_out - device->buffer >= translate_bufsize){
 				device->p_out = device->buffer;
 			}
+
+			/* Konnte das Device nicht schreiben, weil Ringbuffer voll war, kann
+			 * es jetzt wieder schreiben. Ein Element wurde gelesen und es ist Platz
+			 * frei geworden */
+			wake_up_interruptible(&device->waitqueue_write);
 		}
 
 
@@ -269,6 +313,7 @@ ssize_t write(struct file *instance, const char __user *input, size_t count, lof
 		printk(KERN_DEBUG "Minor Device dem Device zugeordnet");
 	#endif
 
+
 	int num_written_chars;
 	for (num_written_chars = 0; num_written_chars < count; num_written_chars++){
 
@@ -282,6 +327,19 @@ ssize_t write(struct file *instance, const char __user *input, size_t count, lof
 		#ifdef PDEBUG
 			printk(KERN_DEBUG "Variablen in Write() initialisiert");
 		#endif
+
+
+		/* Blockiere wenn der Ringbuffer voll ist */
+		if(!WRITE_POSSIBLE){
+			if(instance->f_flags & O_NONBLOCK){
+				return -EAGAIN;
+			}
+
+			if(wait_event_interruptible(device->waitqueue_write, WRITE_POSSIBLE)){
+				return -ERESTARTSYS;
+			}
+		}
+
 
 		/* schreibt einen Wert aus der Adresse input in die Variable chari
 		 * get_user(variable, source)
@@ -336,6 +394,11 @@ ssize_t write(struct file *instance, const char __user *input, size_t count, lof
 		if(device->p_in - device->buffer >= translate_bufsize){
 			device->p_in = device->buffer;
 		}
+
+		/* Konnte das Device nicht lesen, weil Ringbuffer keine Elemente beeinhaltet hat, kann
+		 * es jetzt wieder lesen. Ein Element wurde in den Ringbuffer geschrieben */
+		wake_up_interruptible(&device->waitqueue_read);
+
 	}
 
 	return num_written_chars;
@@ -348,6 +411,8 @@ ssize_t write(struct file *instance, const char __user *input, size_t count, lof
 
 module_init(init_translate);
 module_exit(cleanup_translate);
+module_param(bufsize, int, 0644);
+MODULE_PARM_DESC(bufsize, "RingBuffer Grösse");
 
 
 
